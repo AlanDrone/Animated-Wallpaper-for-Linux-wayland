@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Cosmic Wallpaper
+GenericName=Animated Wallpaper Manager
+Comment=Animated wallpaper manager for videos, GIFs and images on COSMIC Desktop
+Exec=cosmic-wallpaper-ui
+Icon=preferences-desktop-wallpaper
+Terminal=false
+Categories=Utility;Graphics;Settings;
+Keywords=Wallpaper;Animated;Video;GIF;Image;COSMIC;Pop_OS;Background;
+StartupNotify=true

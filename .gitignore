@@ -1,0 +1,15 @@
+# Compiled binaries
+bin/cosmic-wallpaper-engine
+bin/__pycache__/
+*.o
+
+# Runtime generated protocol files
+src/wlr-layer-shell-protocol.h
+src/wlr-layer-shell-protocol.c
+
+# Logs and temporary files
+*.log
+.cache/
+
+# User configurations
+config.json

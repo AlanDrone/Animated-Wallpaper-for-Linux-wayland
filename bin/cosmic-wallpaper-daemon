@@ -1,0 +1,405 @@
+#!/usr/bin/env python3
+"""
+cosmic-wallpaper-daemon
+Supervisory daemon for animated wallpapers on Pop!_OS COSMIC Desktop (Wayland).
+Manages cosmic-wallpaper-engine, output auto-detection, auto-downscaling of 4K videos,
+IPC socket control, and session configuration persistence.
+"""
+
+import os
+import sys
+import json
+import time
+import socket
+import select
+import signal
+import shutil
+import subprocess
+from pathlib import Path
+
+CONFIG_DIR = Path.home() / ".config" / "cosmic-wallpaper"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+LOG_FILE = CONFIG_DIR / "daemon.log"
+
+def get_socket_path() -> Path:
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime_dir and Path(runtime_dir).exists():
+        return Path(runtime_dir) / "cosmic-wallpaper.sock"
+    cache_dir = Path.home() / ".cache" / "cosmic-wallpaper"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir / "cosmic-wallpaper.sock"
+
+def log(msg: str):
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    formatted = f"[{ts}] {msg}"
+    print(formatted, flush=True)
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(LOG_FILE, "a") as f:
+            f.write(formatted + "\n")
+    except Exception:
+        pass
+
+def detect_drm_outputs():
+    outputs = []
+    drm_path = Path("/sys/class/drm")
+    if not drm_path.exists():
+        return [{"name": "DVI-D-1", "status": "connected", "modes": ["1920x1080"]}]
+
+    for p in sorted(drm_path.glob("card*-*")):
+        status_file = p / "status"
+        if not status_file.exists():
+            continue
+        try:
+            status = status_file.read_text().strip()
+        except Exception:
+            continue
+
+        raw_name = p.name
+        # format: card0-DVI-D-1 -> DVI-D-1
+        parts = raw_name.split("-", 1)
+        name = parts[1] if len(parts) > 1 else raw_name
+
+        modes = []
+        modes_file = p / "modes"
+        if modes_file.exists():
+            try:
+                modes = [m.strip() for m in modes_file.read_text().splitlines() if m.strip()]
+            except Exception:
+                pass
+
+        outputs.append({
+            "name": name,
+            "status": status,
+            "modes": modes,
+            "connected": status == "connected"
+        })
+    return outputs
+
+def get_primary_connected_output():
+    outputs = detect_drm_outputs()
+    for o in outputs:
+        if o["connected"]:
+            return o["name"]
+    return "DVI-D-1"
+
+def probe_video(video_path: str):
+    res = {"width": 0, "height": 0, "is_4k": False}
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe or not Path(video_path).exists():
+        return res
+    try:
+        cmd = [
+            ffprobe, "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "json",
+            video_path
+        ]
+        out = subprocess.check_output(cmd, timeout=3)
+        data = json.loads(out)
+        streams = data.get("streams", [])
+        if streams:
+            w = int(streams[0].get("width", 0))
+            h = int(streams[0].get("height", 0))
+            res["width"] = w
+            res["height"] = h
+            res["is_4k"] = (w >= 3840 or h >= 2160)
+    except Exception as e:
+        log(f"ffprobe warning: {e}")
+    return res
+
+class WallpaperDaemon:
+    def __init__(self):
+        self.config = {
+            "current": None,
+            "output": get_primary_connected_output(),
+            "scaling": "fit",
+            "paused": False,
+            "auto_pause_fullscreen": True
+        }
+        self.load_config()
+        self.engine_proc = None
+        self.sock_path = get_socket_path()
+        self.server_sock = None
+        self.running = True
+
+    def load_config(self):
+        if CONFIG_FILE.exists():
+            try:
+                data = json.loads(CONFIG_FILE.read_text())
+                self.config.update(data)
+            except Exception as e:
+                log(f"Failed to load config: {e}")
+
+    def save_config(self):
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            CONFIG_FILE.write_text(json.dumps(self.config, indent=2))
+        except Exception as e:
+            log(f"Failed to save config: {e}")
+
+    def find_engine_bin(self):
+        # 1. Look in adjacent bin directory
+        curr_dir = Path(__file__).resolve().parent
+        candidate1 = curr_dir / "cosmic-wallpaper-engine"
+        if candidate1.exists() and os.access(candidate1, os.X_OK):
+            return str(candidate1)
+
+        # 2. Look in ~/.local/bin
+        candidate2 = Path.home() / ".local" / "bin" / "cosmic-wallpaper-engine"
+        if candidate2.exists() and os.access(candidate2, os.X_OK):
+            return str(candidate2)
+
+        # 3. Look in PATH
+        candidate3 = shutil.which("cosmic-wallpaper-engine")
+        if candidate3:
+            return candidate3
+
+        return None
+
+    def start_engine(self, video_path: str, output: str, scaling: str, start_paused=False):
+        self.stop_engine()
+
+        engine_bin = self.find_engine_bin()
+        if not engine_bin:
+            log("Error: cosmic-wallpaper-engine binary not found! Please run 'make' to compile it.")
+            return False, "cosmic-wallpaper-engine binary not found"
+
+        if not Path(video_path).exists():
+            log(f"Error: Video file not found: {video_path}")
+            return False, f"File not found: {video_path}"
+
+        probe = probe_video(video_path)
+        if probe["is_4k"]:
+            log(f"Notice: Video is 4K ({probe['width']}x{probe['height']}). Engine will automatically downscale to monitor resolution to avoid GL_INVALID_OPERATION.")
+
+        cmd = [
+            engine_bin,
+            "--output", output,
+            "--scaling", scaling
+        ]
+        if start_paused:
+            cmd.append("--pause")
+        cmd.append(video_path)
+
+        log(f"Spawning engine: {' '.join(cmd)}")
+        try:
+            self.engine_proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+            self.config["current"] = str(Path(video_path).resolve())
+            self.config["output"] = output
+            self.config["scaling"] = scaling
+            self.config["paused"] = start_paused
+            self.save_config()
+            return True, "Wallpaper applied"
+        except Exception as e:
+            log(f"Failed to spawn engine: {e}")
+            return False, str(e)
+
+    def stop_engine(self):
+        if self.engine_proc:
+            try:
+                if self.engine_proc.stdin:
+                    try:
+                        self.engine_proc.stdin.write("QUIT\n")
+                        self.engine_proc.stdin.flush()
+                    except Exception:
+                        pass
+                self.engine_proc.terminate()
+                self.engine_proc.wait(timeout=1.5)
+            except Exception:
+                try:
+                    self.engine_proc.kill()
+                except Exception:
+                    pass
+            self.engine_proc = None
+        self.config["current"] = None
+        self.save_config()
+        log("Engine stopped")
+
+    def send_engine_cmd(self, cmd_str: str):
+        if self.engine_proc and self.engine_proc.poll() is None:
+            try:
+                self.engine_proc.stdin.write(cmd_str + "\n")
+                self.engine_proc.stdin.flush()
+                return True
+            except Exception as e:
+                log(f"Failed to send command to engine: {e}")
+        return False
+
+    def handle_client_request(self, req: dict) -> dict:
+        cmd = req.get("command", "").lower()
+
+        if cmd == "set":
+            path = req.get("path")
+            if not path:
+                return {"status": "error", "message": "Missing 'path' parameter"}
+            output = req.get("output") or self.config.get("output") or get_primary_connected_output()
+            scaling = req.get("scaling") or self.config.get("scaling") or "fit"
+            ok, msg = self.start_engine(path, output, scaling)
+            return {"status": "ok" if ok else "error", "message": msg}
+
+        elif cmd == "pause":
+            if self.send_engine_cmd("PAUSE"):
+                self.config["paused"] = True
+                self.save_config()
+                return {"status": "ok", "paused": True}
+            return {"status": "error", "message": "Engine not running"}
+
+        elif cmd == "resume":
+            if self.send_engine_cmd("RESUME"):
+                self.config["paused"] = False
+                self.save_config()
+                return {"status": "ok", "paused": False}
+            return {"status": "error", "message": "Engine not running"}
+
+        elif cmd == "toggle":
+            new_state = not self.config.get("paused", False)
+            cmd_name = "PAUSE" if new_state else "RESUME"
+            if self.send_engine_cmd(cmd_name):
+                self.config["paused"] = new_state
+                self.save_config()
+                return {"status": "ok", "paused": new_state}
+            return {"status": "error", "message": "Engine not running"}
+
+        elif cmd == "stop":
+            self.stop_engine()
+            return {"status": "ok", "message": "Wallpaper engine stopped"}
+
+        elif cmd == "scaling":
+            mode = req.get("scaling", "fit")
+            self.config["scaling"] = mode
+            self.save_config()
+            if self.send_engine_cmd(f"SCALING {mode}"):
+                return {"status": "ok", "scaling": mode}
+            return {"status": "ok", "scaling": mode}
+
+        elif cmd == "status":
+            is_running = (self.engine_proc is not None and self.engine_proc.poll() is None)
+            return {
+                "status": "ok",
+                "running": is_running,
+                "current": self.config.get("current"),
+                "output": self.config.get("output"),
+                "scaling": self.config.get("scaling"),
+                "paused": self.config.get("paused", False),
+                "pid": self.engine_proc.pid if is_running else None
+            }
+
+        elif cmd == "outputs":
+            outputs = detect_drm_outputs()
+            return {"status": "ok", "outputs": outputs}
+
+        return {"status": "error", "message": f"Unknown command: {cmd}"}
+
+    def setup_server_socket(self):
+        if self.sock_path.exists():
+            try:
+                # Check if another daemon is running
+                test_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                test_sock.connect(str(self.sock_path))
+                test_sock.close()
+                log(f"Another daemon is already active on {self.sock_path}. Exiting.")
+                sys.exit(0)
+            except Exception:
+                self.sock_path.unlink(missing_ok=True)
+
+        self.server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.server_sock.bind(str(self.sock_path))
+        self.server_sock.listen(5)
+        self.server_sock.setblocking(False)
+        log(f"Daemon IPC listening on {self.sock_path}")
+
+    def run(self):
+        self.setup_server_socket()
+
+        # Restore previous wallpaper if configured
+        last_video = self.config.get("current")
+        if last_video and Path(last_video).exists():
+            log(f"Restoring wallpaper on startup: {last_video}")
+            self.start_engine(
+                last_video,
+                self.config.get("output", "DVI-D-1"),
+                self.config.get("scaling", "fit"),
+                self.config.get("paused", False)
+            )
+
+        clients = []
+
+        def handle_signal(sig, frame):
+            log("Signal received, shutting down daemon...")
+            self.running = False
+
+        signal.signal(signal.SIGINT, handle_signal)
+        signal.signal(signal.SIGTERM, handle_signal)
+
+        while self.running:
+            readable = [self.server_sock] + clients
+            if self.engine_proc and self.engine_proc.stdout:
+                readable.append(self.engine_proc.stdout)
+
+            try:
+                r_ready, _, _ = select.select(readable, [], [], 1.0)
+            except (select.error, InterruptedError):
+                continue
+
+            for s in r_ready:
+                if s is self.server_sock:
+                    try:
+                        client, _ = self.server_sock.accept()
+                        client.setblocking(True)
+                        clients.append(client)
+                    except Exception:
+                        pass
+
+                elif self.engine_proc and s is self.engine_proc.stdout:
+                    line = self.engine_proc.stdout.readline()
+                    if line:
+                        log(f"[engine] {line.strip()}")
+                    elif self.engine_proc.poll() is not None:
+                        log(f"Engine process exited with return code {self.engine_proc.returncode}")
+                        self.engine_proc = None
+
+                else:
+                    # Client socket
+                    try:
+                        data = s.recv(4096)
+                        if data:
+                            try:
+                                req = json.loads(data.decode("utf-8"))
+                            except json.JSONDecodeError:
+                                # Also allow plain text commands like 'pause', 'resume', 'status'
+                                raw_cmd = data.decode("utf-8").strip()
+                                req = {"command": raw_cmd}
+                            resp = self.handle_client_request(req)
+                            s.sendall(json.dumps(resp).encode("utf-8") + b"\n")
+                        else:
+                            clients.remove(s)
+                            s.close()
+                    except Exception:
+                        if s in clients:
+                            clients.remove(s)
+                            s.close()
+
+            # Check engine health
+            if self.engine_proc and self.engine_proc.poll() is not None:
+                log(f"Engine process exited with code {self.engine_proc.returncode}")
+                self.engine_proc = None
+
+        log("Cleaning up daemon...")
+        self.stop_engine()
+        if self.server_sock:
+            self.server_sock.close()
+        self.sock_path.unlink(missing_ok=True)
+        log("Daemon stopped.")
+
+if __name__ == "__main__":
+    daemon = WallpaperDaemon()
+    daemon.run()

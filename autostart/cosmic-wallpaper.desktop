@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Cosmic Wallpaper Daemon
+Comment=Animated wallpaper background daemon for Pop!_OS COSMIC Desktop
+Exec=cosmic-wallpaper-daemon
+Icon=preferences-desktop-wallpaper
+Terminal=false
+Categories=Utility;Graphics;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true
+X-COSMIC-Autostart-enabled=true

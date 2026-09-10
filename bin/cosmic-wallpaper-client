@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""
+cosmic-wallpaper-client
+CLI client for controlling cosmic-wallpaper-daemon via UNIX Domain Socket.
+"""
+
+import os
+import sys
+import json
+import socket
+from pathlib import Path
+
+def get_socket_path() -> Path:
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime_dir and Path(runtime_dir).exists():
+        return Path(runtime_dir) / "cosmic-wallpaper.sock"
+    return Path.home() / ".cache" / "cosmic-wallpaper" / "cosmic-wallpaper.sock"
+
+def send_command(payload: dict) -> dict:
+    sock_path = get_socket_path()
+    if not sock_path.exists():
+        print(f"Error: Daemon socket not found at {sock_path}.")
+        print("Make sure cosmic-wallpaper-daemon is running.")
+        print("Start it with: cosmic-wallpaper-daemon &")
+        sys.exit(1)
+
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.connect(str(sock_path))
+        s.sendall(json.dumps(payload).encode("utf-8"))
+        data = s.recv(8192)
+        if not data:
+            return {"status": "error", "message": "Empty response from daemon"}
+        return json.loads(data.decode("utf-8"))
+    except Exception as e:
+        print(f"Error connecting to daemon: {e}")
+        sys.exit(1)
+    finally:
+        s.close()
+
+def print_help():
+    print("""Cosmic Wallpaper Client (Wayland / Pop!_OS COSMIC)
+
+Usage:
+  cosmic-wallpaper-client set <path_to_video> [options]
+  cosmic-wallpaper-client pause
+  cosmic-wallpaper-client resume
+  cosmic-wallpaper-client toggle
+  cosmic-wallpaper-client stop
+  cosmic-wallpaper-client status
+  cosmic-wallpaper-client outputs
+  cosmic-wallpaper-client help
+
+Options for 'set':
+  --output <name>        Specify output monitor (e.g. DVI-D-1, DP-1, or '*'). Default: primary
+  --scaling <mode>       Scaling mode: fit (default), fill, stretch
+""")
+
+def main():
+    if len(sys.argv) < 2:
+        print_help()
+        sys.exit(1)
+
+    cmd = sys.argv[1].lower()
+
+    if cmd in ["help", "--help", "-h"]:
+        print_help()
+        return
+
+    if cmd == "set":
+        if len(sys.argv) < 3:
+            print("Error: Please provide path to video file.")
+            print("Usage: cosmic-wallpaper-client set <path_to_video> [--output <name>] [--scaling <fit|fill>]")
+            sys.exit(1)
+
+        video_path = sys.argv[2]
+        output = None
+        scaling = "fit"
+
+        i = 3
+        while i < len(sys.argv):
+            if sys.argv[i] == "--output" and i + 1 < len(sys.argv):
+                output = sys.argv[i + 1]
+                i += 2
+            elif sys.argv[i] == "--scaling" and i + 1 < len(sys.argv):
+                scaling = sys.argv[i + 1]
+                i += 2
+            else:
+                i += 1
+
+        resolved_path = str(Path(video_path).resolve())
+        if not Path(resolved_path).exists():
+            print(f"Error: File not found: {resolved_path}")
+            sys.exit(1)
+
+        payload = {
+            "command": "set",
+            "path": resolved_path,
+            "scaling": scaling
+        }
+        if output:
+            payload["output"] = output
+
+        resp = send_command(payload)
+        if resp.get("status") == "ok":
+            print(f"✓ Wallpaper applied: {resolved_path}")
+            if output:
+                print(f"  Target output: {output}")
+            print(f"  Scaling mode: {scaling}")
+        else:
+            print(f"✗ Failed to set wallpaper: {resp.get('message')}")
+            sys.exit(1)
+
+    elif cmd == "pause":
+        resp = send_command({"command": "pause"})
+        if resp.get("status") == "ok":
+            print("⏸ Wallpaper playback paused.")
+        else:
+            print(f"✗ Error: {resp.get('message')}")
+
+    elif cmd == "resume":
+        resp = send_command({"command": "resume"})
+        if resp.get("status") == "ok":
+            print("▶ Wallpaper playback resumed.")
+        else:
+            print(f"✗ Error: {resp.get('message')}")
+
+    elif cmd == "toggle":
+        resp = send_command({"command": "toggle"})
+        if resp.get("status") == "ok":
+            state = "Paused" if resp.get("paused") else "Playing"
+            print(f"⏯ Wallpaper state: {state}")
+        else:
+            print(f"✗ Error: {resp.get('message')}")
+
+    elif cmd == "stop":
+        resp = send_command({"command": "stop"})
+        if resp.get("status") == "ok":
+            print("⏹ Wallpaper stopped.")
+        else:
+            print(f"✗ Error: {resp.get('message')}")
+
+    elif cmd == "status":
+        resp = send_command({"command": "status"})
+        print("Cosmic Wallpaper Status:")
+        print(f"  Active:  {'Yes' if resp.get('running') else 'No'}")
+        print(f"  File:    {resp.get('current') or 'None'}")
+        print(f"  Output:  {resp.get('output') or 'Auto'}")
+        print(f"  Scaling: {resp.get('scaling') or 'fit'}")
+        print(f"  Paused:  {'Yes' if resp.get('paused') else 'No'}")
+        if resp.get("pid"):
+            print(f"  PID:     {resp.get('pid')}")
+
+    elif cmd == "outputs":
+        resp = send_command({"command": "outputs"})
+        print("Detected Display Outputs:")
+        for o in resp.get("outputs", []):
+            status_str = "CONNECTED" if o.get("connected") else "disconnected"
+            modes_str = ", ".join(o.get("modes", [])) if o.get("modes") else "auto"
+            marker = "*" if o.get("connected") else " "
+            print(f" {marker} {o.get('name'):<12} [{status_str}] Modes: {modes_str}")
+
+    else:
+        print(f"Unknown command: '{cmd}'")
+        print_help()
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

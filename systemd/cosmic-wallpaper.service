@@ -1,0 +1,13 @@
+[Unit]
+Description=Cosmic Wallpaper Daemon
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=cosmic-wallpaper-daemon
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=graphical-session.target

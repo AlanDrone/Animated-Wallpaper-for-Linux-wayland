@@ -1,0 +1,698 @@
+#!/usr/bin/env python3
+"""
+cosmic-wallpaper-ui
+Sophisticated GTK4 / Libadwaita User Interface for Cosmic Wallpaper.
+Provides a plug-and-play visual gallery, drag-and-drop wallpaper application,
+monitor selection, scaling modes, play/pause controls, and system autostart.
+"""
+
+import os
+import sys
+import json
+import time
+import socket
+import hashlib
+import shutil
+import threading
+import subprocess
+from pathlib import Path
+from PIL import Image
+
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Gtk, Adw, Gio, GLib, Gdk
+
+CACHE_DIR = Path.home() / ".cache" / "cosmic-wallpaper"
+THUMBS_DIR = CACHE_DIR / "thumbs"
+CONFIG_DIR = Path.home() / ".config" / "cosmic-wallpaper"
+LIBRARY_FILE = CONFIG_DIR / "library.json"
+AUTOSTART_FILE = Path.home() / ".config" / "autostart" / "cosmic-wallpaper.desktop"
+
+VIDEO_EXTS = {".mp4", ".webm", ".mkv", ".avi", ".mov"}
+GIF_EXTS = {".gif"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+ALL_SUPPORTED_EXTS = VIDEO_EXTS | GIF_EXTS | IMAGE_EXTS
+
+APP_CSS = """
+.wallpaper-card {
+    border-radius: 12px;
+    background-color: @card_bg_color;
+    border: 1px solid @borders;
+    transition: all 200ms ease;
+    padding: 8px;
+}
+.wallpaper-card:hover {
+    border-color: @accent_color;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+.wallpaper-card-active {
+    border: 2px solid @accent_color;
+    background-color: alpha(@accent_color, 0.08);
+}
+.thumb-image {
+    border-radius: 8px;
+    min-width: 240px;
+    min-height: 135px;
+}
+.media-badge {
+    font-size: 0.75rem;
+    font-weight: bold;
+    padding: 2px 6px;
+    border-radius: 6px;
+    color: white;
+}
+.badge-video {
+    background-color: #3584e4;
+}
+.badge-gif {
+    background-color: #e66100;
+}
+.badge-image {
+    background-color: #26a269;
+}
+.active-badge {
+    background-color: #33d17a;
+    color: #1c1c1c;
+    font-weight: bold;
+    font-size: 0.75rem;
+    padding: 2px 8px;
+    border-radius: 10px;
+}
+.drop-zone {
+    border: 2px dashed @accent_color;
+    border-radius: 12px;
+    padding: 24px;
+}
+"""
+
+def get_socket_path() -> Path:
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime_dir and Path(runtime_dir).exists():
+        return Path(runtime_dir) / "cosmic-wallpaper.sock"
+    return CACHE_DIR / "cosmic-wallpaper.sock"
+
+def ensure_daemon_running():
+    sock_path = get_socket_path()
+    if sock_path.exists():
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.connect(str(sock_path))
+            s.close()
+            return
+        except Exception:
+            sock_path.unlink(missing_ok=True)
+
+    # Start daemon
+    curr_dir = Path(__file__).resolve().parent
+    candidates = [
+        curr_dir / "cosmic-wallpaper-daemon",
+        Path.home() / ".local" / "bin" / "cosmic-wallpaper-daemon",
+        Path(shutil.which("cosmic-wallpaper-daemon") or "")
+    ]
+    daemon_bin = None
+    for c in candidates:
+        if c.exists() and os.access(c, os.X_OK):
+            daemon_bin = str(c)
+            break
+
+    if daemon_bin:
+        try:
+            subprocess.Popen(
+                [daemon_bin],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+            time.sleep(0.3)
+        except Exception as e:
+            print(f"[ui] Failed to auto-start daemon: {e}")
+
+def send_ipc(payload: dict) -> dict:
+    sock_path = get_socket_path()
+    if not sock_path.exists():
+        ensure_daemon_running()
+        time.sleep(0.2)
+        if not sock_path.exists():
+            return {"status": "error", "message": "Daemon not running"}
+
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(2.0)
+        s.connect(str(sock_path))
+        s.sendall(json.dumps(payload).encode("utf-8"))
+        data = s.recv(8192)
+        s.close()
+        if data:
+            return json.loads(data.decode("utf-8"))
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    return {"status": "error", "message": "No response"}
+
+def generate_thumb(media_path: str) -> Path:
+    THUMBS_DIR.mkdir(parents=True, exist_ok=True)
+    p = Path(media_path)
+    file_hash = hashlib.md5(f"{p.resolve()}_{p.stat().st_mtime}".encode("utf-8")).hexdigest()
+    thumb_path = THUMBS_DIR / f"{file_hash}.jpg"
+
+    if thumb_path.exists():
+        return thumb_path
+
+    ext = p.suffix.lower()
+    if ext in IMAGE_EXTS or ext in GIF_EXTS:
+        try:
+            with Image.open(p) as img:
+                img.seek(0)
+                rgb = img.convert("RGB")
+                rgb.thumbnail((320, 180), Image.Resampling.LANCZOS)
+                # Create exact 16:9 canvas
+                canvas = Image.new("RGB", (320, 180), (30, 30, 30))
+                paste_x = (320 - rgb.width) // 2
+                paste_y = (180 - rgb.height) // 2
+                canvas.paste(rgb, (paste_x, paste_y))
+                canvas.save(thumb_path, "JPEG", quality=85)
+                return thumb_path
+        except Exception as e:
+            print(f"[ui] Pillow thumb error for {p}: {e}")
+
+    # Fallback to ffmpeg for videos and remaining formats
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        try:
+            cmd = [
+                ffmpeg, "-y", "-ss", "00:00:01",
+                "-i", str(p),
+                "-vframes", "1",
+                "-vf", "scale=320:180:force_original_aspect_ratio=decrease,pad=320:180:(ow-iw)/2:(oh-ih)/2:color=black",
+                str(thumb_path)
+            ]
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
+            if thumb_path.exists():
+                return thumb_path
+        except Exception as e:
+            print(f"[ui] ffmpeg thumb error: {e}")
+
+    return None
+
+class WallpaperCard(Gtk.Box):
+    def __init__(self, file_path: str, is_active=False, on_select=None, on_remove=None):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.file_path = file_path
+        self.on_select = on_select
+        self.on_remove = on_remove
+        self.is_active = is_active
+
+        self.add_css_class("wallpaper-card")
+        if is_active:
+            self.add_css_class("wallpaper-card-active")
+
+        self.set_size_request(240, -1)
+
+        # Image overlay container
+        overlay = Gtk.Overlay()
+
+        # Image placeholder
+        self.picture = Gtk.Picture()
+        self.picture.set_content_fit(Gtk.ContentFit.COVER)
+        self.picture.add_css_class("thumb-image")
+        self.picture.set_size_request(240, 135)
+        overlay.set_child(self.picture)
+
+        # Badge container top
+        top_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        top_box.set_margin_top(6)
+        top_box.set_margin_start(6)
+        top_box.set_margin_end(6)
+
+        ext = Path(file_path).suffix.lower()
+        badge_label = "VIDEO"
+        badge_class = "badge-video"
+        if ext in GIF_EXTS:
+            badge_label = "GIF"
+            badge_class = "badge-gif"
+        elif ext in IMAGE_EXTS:
+            badge_label = "IMAGE"
+            badge_class = "badge-image"
+
+        badge = Gtk.Label(label=badge_label)
+        badge.add_css_class("media-badge")
+        badge.add_css_class(badge_class)
+        top_box.append(badge)
+
+        self.active_indicator = Gtk.Label(label="✓ ACTIVE")
+        self.active_indicator.add_css_class("active-badge")
+        self.active_indicator.set_visible(is_active)
+        top_box.append(self.active_indicator)
+
+        overlay.add_overlay(top_box)
+        self.append(overlay)
+
+        # Info & Controls Row
+        info_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        info_row.set_margin_start(4)
+        info_row.set_margin_end(4)
+
+        name_label = Gtk.Label(label=Path(file_path).name)
+        name_label.set_ellipsize(3) # PANGO_ELLIPSIZE_END
+        name_label.set_hexpand(True)
+        name_label.set_xalign(0)
+        name_label.add_css_class("heading")
+        info_row.append(name_label)
+
+        # Remove button
+        del_btn = Gtk.Button.new_from_icon_name("user-trash-symbolic")
+        del_btn.add_css_class("flat")
+        del_btn.set_tooltip_text("Remove from gallery")
+        del_btn.connect("clicked", lambda _: self.on_remove(self.file_path) if self.on_remove else None)
+        info_row.append(del_btn)
+
+        self.append(info_row)
+
+        # Apply button
+        self.apply_btn = Gtk.Button(label="Set as Wallpaper" if not is_active else "Active on Desktop")
+        self.apply_btn.add_css_class("suggested-action" if not is_active else "success")
+        self.apply_btn.connect("clicked", lambda _: self.on_select(self.file_path) if self.on_select else None)
+        self.append(self.apply_btn)
+
+        # Make entire card clickable
+        gesture = Gtk.GestureClick.new()
+        gesture.connect("released", lambda *_: self.on_select(self.file_path) if self.on_select else None)
+        self.add_controller(gesture)
+
+        # Load thumb asynchronously
+        threading.Thread(target=self._async_load_thumb, daemon=True).start()
+
+    def _async_load_thumb(self):
+        t_path = generate_thumb(self.file_path)
+        if t_path and t_path.exists():
+            GLib.idle_add(lambda: self.picture.set_filename(str(t_path)))
+
+    def set_active_state(self, active: bool):
+        self.is_active = active
+        if active:
+            self.add_css_class("wallpaper-card-active")
+            self.active_indicator.set_visible(True)
+            self.apply_btn.set_label("Active on Desktop")
+            self.apply_btn.remove_css_class("suggested-action")
+            self.apply_btn.add_css_class("success")
+        else:
+            self.remove_css_class("wallpaper-card-active")
+            self.active_indicator.set_visible(False)
+            self.apply_btn.set_label("Set as Wallpaper")
+            self.apply_btn.remove_css_class("success")
+            self.apply_btn.add_css_class("suggested-action")
+
+class CosmicWallpaperWindow(Adw.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title="Cosmic Wallpaper")
+        self.set_default_size(1000, 720)
+        self.set_icon_name("preferences-desktop-wallpaper")
+
+        self.library = []
+        self.cards = {}
+        self.current_wallpaper = None
+        self.is_paused = False
+        self.selected_output = "DVI-D-1"
+        self.selected_scaling = "fit"
+
+        self.load_library()
+        self.build_ui()
+        self.setup_drag_and_drop()
+        self.start_sync_timer()
+
+    def build_ui(self):
+        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.set_content(main_box)
+
+        # 1. HeaderBar
+        header = Adw.HeaderBar()
+        title = Adw.WindowTitle(title="Cosmic Wallpaper", subtitle="Animated Wallpapers for COSMIC Desktop")
+        header.set_title_widget(title)
+
+        # Add File Button
+        add_btn = Gtk.Button(label="Add Media")
+        add_btn.set_icon_name("list-add-symbolic")
+        add_btn.add_css_class("suggested-action")
+        add_btn.connect("clicked", self.on_add_file_clicked)
+        header.pack_start(add_btn)
+
+        # Play/Pause Toggle
+        self.play_pause_btn = Gtk.Button.new_from_icon_name("media-playback-pause-symbolic")
+        self.play_pause_btn.set_tooltip_text("Pause / Resume Wallpaper")
+        self.play_pause_btn.connect("clicked", self.on_toggle_pause)
+        header.pack_end(self.play_pause_btn)
+
+        # Stop Button
+        stop_btn = Gtk.Button.new_from_icon_name("process-stop-symbolic")
+        stop_btn.set_tooltip_text("Stop Animated Wallpaper")
+        stop_btn.add_css_class("destructive-action")
+        stop_btn.connect("clicked", self.on_stop_wallpaper)
+        header.pack_end(stop_btn)
+
+        main_box.append(header)
+
+        # 2. Control Toolbar / Status Bar
+        toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+        toolbar.set_margin_top(12)
+        toolbar.set_margin_bottom(12)
+        toolbar.set_margin_start(20)
+        toolbar.set_margin_end(20)
+
+        # Monitor Dropdown
+        mon_label = Gtk.Label(label="Monitor:")
+        mon_label.add_css_class("heading")
+        toolbar.append(mon_label)
+
+        self.monitor_dropdown = Gtk.DropDown.new_from_strings(["DVI-D-1 (1920x1080)", "All Monitors (*)"])
+        self.monitor_dropdown.connect("notify::selected", self.on_monitor_changed)
+        toolbar.append(self.monitor_dropdown)
+
+        # Scaling Dropdown
+        scale_label = Gtk.Label(label="Scaling:")
+        scale_label.add_css_class("heading")
+        toolbar.append(scale_label)
+
+        self.scaling_dropdown = Gtk.DropDown.new_from_strings(["Fit", "Fill", "Stretch"])
+        self.scaling_dropdown.connect("notify::selected", self.on_scaling_changed)
+        toolbar.append(self.scaling_dropdown)
+
+        # Spacer
+        spacer = Gtk.Box()
+        spacer.set_hexpand(True)
+        toolbar.append(spacer)
+
+        # Autostart Switch
+        autostart_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        autostart_label = Gtk.Label(label="Start with system:")
+        self.autostart_switch = Gtk.Switch()
+        self.autostart_switch.set_active(AUTOSTART_FILE.exists())
+        self.autostart_switch.connect("state-set", self.on_autostart_toggled)
+        autostart_box.append(autostart_label)
+        autostart_box.append(self.autostart_switch)
+        toolbar.append(autostart_box)
+
+        main_box.append(toolbar)
+        main_box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+
+        # 3. Scrolled Gallery Area
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_vexpand(True)
+        scroller.set_hexpand(True)
+
+        content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        content_box.set_margin_top(20)
+        content_box.set_margin_bottom(20)
+        content_box.set_margin_start(20)
+        content_box.set_margin_end(20)
+
+        # Drag and Drop Banner
+        self.drop_banner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.drop_banner.add_css_class("drop-zone")
+        drop_icon = Gtk.Image.new_from_icon_name("folder-download-symbolic")
+        drop_icon.set_pixel_size(32)
+        drop_label = Gtk.Label(label="Drag and drop videos, GIFs or images here to set them instantly!")
+        drop_label.add_css_class("title-4")
+        self.drop_banner.append(drop_icon)
+        self.drop_banner.append(drop_label)
+        content_box.append(self.drop_banner)
+
+        # Gallery FlowBox
+        self.flowbox = Gtk.FlowBox()
+        self.flowbox.set_valign(Gtk.Align.START)
+        self.flowbox.set_max_children_per_line(30)
+        self.flowbox.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.flowbox.set_row_spacing(16)
+        self.flowbox.set_column_spacing(16)
+        content_box.append(self.flowbox)
+
+        scroller.set_child(content_box)
+        main_box.append(scroller)
+
+        self.populate_gallery()
+
+    def setup_drag_and_drop(self):
+        target = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
+        target.connect("drop", self.on_drop_files)
+        self.add_controller(target)
+
+    def on_drop_files(self, target, value, x, y):
+        if not value:
+            return False
+        files = value.get_files()
+        added_any = False
+        last_added = None
+
+        for f in files:
+            path = f.get_path()
+            if path and Path(path).suffix.lower() in ALL_SUPPORTED_EXTS:
+                if path not in self.library:
+                    self.library.insert(0, path)
+                    added_any = True
+                last_added = path
+
+        if added_any:
+            self.save_library()
+            self.populate_gallery()
+
+        if last_added:
+            self.apply_wallpaper(last_added)
+        return True
+
+    def load_library(self):
+        self.library = []
+        if LIBRARY_FILE.exists():
+            try:
+                self.library = json.loads(LIBRARY_FILE.read_text())
+            except Exception:
+                pass
+
+        # Auto-discover wallpapers if library is empty or has few items
+        discovered = []
+        search_dirs = [
+            # English standard XDG paths
+            Path.home() / "Videos" / "Wallpapers",
+            Path.home() / "Videos",
+            Path.home() / "Pictures",
+            Path.home() / "Downloads",
+            # Portuguese locale variants (Ubuntu/Pop!_OS in Portuguese)
+            Path.home() / "Vídeos" / "Wallpapers",
+            Path.home() / "Vídeos",
+            Path.home() / "Imagens",
+            # Spanish locale variants
+            Path.home() / "Vídeos",
+            Path.home() / "Imágenes",
+        ]
+        for d in search_dirs:
+            if d.exists():
+                for ext in ALL_SUPPORTED_EXTS:
+                    for item in d.glob(f"*{ext}"):
+                        discovered.append(str(item.resolve()))
+
+        for item in discovered:
+            if item not in self.library:
+                self.library.append(item)
+
+        self.save_library()
+
+    def save_library(self):
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            LIBRARY_FILE.write_text(json.dumps(self.library, indent=2))
+        except Exception as e:
+            print(f"[ui] Failed to save library: {e}")
+
+    def populate_gallery(self):
+        # Clear flowbox
+        while True:
+            child = self.flowbox.get_first_child()
+            if not child:
+                break
+            self.flowbox.remove(child)
+
+        self.cards.clear()
+
+        for path in self.library:
+            if not Path(path).exists():
+                continue
+            is_active = (self.current_wallpaper and Path(path).resolve() == Path(self.current_wallpaper).resolve())
+            card = WallpaperCard(
+                file_path=path,
+                is_active=is_active,
+                on_select=self.apply_wallpaper,
+                on_remove=self.remove_from_library
+            )
+            self.cards[path] = card
+            self.flowbox.append(card)
+
+    def apply_wallpaper(self, path: str):
+        output = self.selected_output
+        scaling = self.selected_scaling
+
+        print(f"[ui] Applying wallpaper: {path} (output: {output}, scaling: {scaling})")
+        payload = {
+            "command": "set",
+            "path": path,
+            "output": output,
+            "scaling": scaling
+        }
+
+        def _do_send():
+            resp = send_ipc(payload)
+            GLib.idle_add(lambda: self._on_applied(path, resp))
+
+        threading.Thread(target=_do_send, daemon=True).start()
+
+    def _on_applied(self, path: str, resp: dict):
+        if resp.get("status") == "ok":
+            self.current_wallpaper = path
+            self.is_paused = False
+            self.play_pause_btn.set_icon_name("media-playback-pause-symbolic")
+            for p, card in self.cards.items():
+                card.set_active_state(Path(p).resolve() == Path(path).resolve())
+        else:
+            self.show_toast(f"Failed to apply: {resp.get('message')}")
+
+    def remove_from_library(self, path: str):
+        if path in self.library:
+            self.library.remove(path)
+            self.save_library()
+            self.populate_gallery()
+
+    def on_add_file_clicked(self, _btn):
+        dialog = Gtk.FileChooserNative.new(
+            "Select a Video, GIF or Image",
+            self,
+            Gtk.FileChooserAction.OPEN,
+            "Add",
+            "Cancel"
+        )
+        filter_all = Gtk.FileFilter()
+        filter_all.set_name("Supported Media (Videos, GIFs, Images)")
+        for ext in ALL_SUPPORTED_EXTS:
+            filter_all.add_pattern(f"*{ext}")
+            filter_all.add_pattern(f"*{ext.upper()}")
+        dialog.add_filter(filter_all)
+
+        def on_response(d, response_id):
+            if response_id == Gtk.ResponseType.ACCEPT:
+                file = d.get_file()
+                if file:
+                    path = file.get_path()
+                    if path and path not in self.library:
+                        self.library.insert(0, path)
+                        self.save_library()
+                        self.populate_gallery()
+                        self.apply_wallpaper(path)
+            d.destroy()
+
+        dialog.connect("response", on_response)
+        dialog.show()
+
+    def on_toggle_pause(self, _btn):
+        def _toggle():
+            resp = send_ipc({"command": "toggle"})
+            if resp.get("status") == "ok":
+                self.is_paused = resp.get("paused", False)
+                icon = "media-playback-start-symbolic" if self.is_paused else "media-playback-pause-symbolic"
+                GLib.idle_add(lambda: self.play_pause_btn.set_icon_name(icon))
+        threading.Thread(target=_toggle, daemon=True).start()
+
+    def on_stop_wallpaper(self, _btn):
+        def _stop():
+            send_ipc({"command": "stop"})
+            GLib.idle_add(self._on_stopped)
+        threading.Thread(target=_stop, daemon=True).start()
+
+    def _on_stopped(self):
+        self.current_wallpaper = None
+        for card in self.cards.values():
+            card.set_active_state(False)
+        self.show_toast("Wallpaper stopped")
+
+    def on_monitor_changed(self, dropdown, _param):
+        idx = dropdown.get_selected()
+        self.selected_output = "DVI-D-1" if idx == 0 else "*"
+        if self.current_wallpaper:
+            self.apply_wallpaper(self.current_wallpaper)
+
+    def on_scaling_changed(self, dropdown, _param):
+        modes = ["fit", "fill", "stretch"]
+        idx = dropdown.get_selected()
+        self.selected_scaling = modes[idx] if idx < len(modes) else "fit"
+        def _send():
+            send_ipc({"command": "scaling", "scaling": self.selected_scaling})
+        threading.Thread(target=_send, daemon=True).start()
+
+    def on_autostart_toggled(self, switch, state):
+        if state:
+            AUTOSTART_FILE.parent.mkdir(parents=True, exist_ok=True)
+            desktop_content = """[Desktop Entry]
+Type=Application
+Name=Cosmic Wallpaper Daemon
+Comment=Animated wallpaper daemon for Pop!_OS COSMIC
+Exec=cosmic-wallpaper-daemon
+Icon=preferences-desktop-wallpaper
+Terminal=false
+Categories=Utility;Graphics;
+X-COSMIC-Autostart-enabled=true
+"""
+            AUTOSTART_FILE.write_text(desktop_content)
+            self.show_toast("Autostart enabled")
+        else:
+            AUTOSTART_FILE.unlink(missing_ok=True)
+            self.show_toast("Autostart disabled")
+        return False
+
+    def show_toast(self, message: str):
+        toast = Adw.Toast.new(message)
+        toast.set_timeout(3)
+        # Display toast overlay if present or notification
+        print(f"[ui] Toast: {message}")
+
+    def start_sync_timer(self):
+        def _poll():
+            resp = send_ipc({"command": "status"})
+            if resp.get("status") == "ok":
+                cur = resp.get("current")
+                paused = resp.get("paused", False)
+                if cur != self.current_wallpaper or paused != self.is_paused:
+                    self.current_wallpaper = cur
+                    self.is_paused = paused
+                    GLib.idle_add(self._sync_ui_state)
+            return True
+
+        GLib.timeout_add_seconds(2, _poll)
+
+    def _sync_ui_state(self):
+        icon = "media-playback-start-symbolic" if self.is_paused else "media-playback-pause-symbolic"
+        self.play_pause_btn.set_icon_name(icon)
+        for p, card in self.cards.items():
+            card.set_active_state(bool(self.current_wallpaper and Path(p).resolve() == Path(self.current_wallpaper).resolve()))
+
+class CosmicWallpaperApp(Adw.Application):
+    def __init__(self):
+        super().__init__(
+            application_id="io.github.AlanDrone.animated-wallpaper",
+            flags=Gio.ApplicationFlags.FLAGS_NONE
+        )
+
+    def do_startup(self):
+        Adw.Application.do_startup(self)
+        provider = Gtk.CssProvider()
+        provider.load_from_data(APP_CSS.encode("utf-8"))
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(),
+            provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+    def do_activate(self):
+        win = self.props.active_window
+        if not win:
+            win = CosmicWallpaperWindow(self)
+        win.present()
+
+if __name__ == "__main__":
+    ensure_daemon_running()
+    app = CosmicWallpaperApp()
+    app.run(sys.argv)
