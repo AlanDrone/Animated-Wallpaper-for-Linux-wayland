@@ -709,7 +709,7 @@ X-COSMIC-Autostart-enabled=true
 class CosmicWallpaperApp(Adw.Application):
     def __init__(self):
         super().__init__(
-            application_id="io.github.AlanDrone.animated-wallpaper",
+            application_id="io.github.animated_wallpaper",
             flags=Gio.ApplicationFlags.FLAGS_NONE
         )
 

@@ -48,7 +48,7 @@ install: all
 	install -m 755 $(UI_BIN) $(BINDIR)/cosmic-wallpaper-ui
 	@sed 's|Exec=cosmic-wallpaper-daemon|Exec=$(BINDIR)/cosmic-wallpaper-daemon|g' autostart/cosmic-wallpaper.desktop > $(AUTOSTART_DIR)/cosmic-wallpaper.desktop
 	@sed 's|ExecStart=cosmic-wallpaper-daemon|ExecStart=$(BINDIR)/cosmic-wallpaper-daemon|g' systemd/cosmic-wallpaper.service > $(SYSTEMD_USER_DIR)/cosmic-wallpaper.service
-	@sed 's|Exec=cosmic-wallpaper-ui|Exec=$(BINDIR)/cosmic-wallpaper-ui|g' desktop/io.github.AlanDrone.animated-wallpaper.desktop > $(APPS_DIR)/io.github.AlanDrone.animated-wallpaper.desktop
+	@sed 's|Exec=cosmic-wallpaper-ui|Exec=$(BINDIR)/cosmic-wallpaper-ui|g' desktop/io.github.animated_wallpaper.desktop > $(APPS_DIR)/io.github.animated_wallpaper.desktop
 	@echo "✓ Successfully installed to $(BINDIR)"
 	@echo "✓ App launcher created in $(APPS_DIR)"
 	@echo "✓ Autostart created in $(AUTOSTART_DIR)/cosmic-wallpaper.desktop"
@@ -59,7 +59,7 @@ uninstall:
 	rm -f $(BINDIR)/cosmic-wallpaper-daemon
 	rm -f $(BINDIR)/cosmic-wallpaper-client
 	rm -f $(BINDIR)/cosmic-wallpaper-ui
-	rm -f $(APPS_DIR)/io.github.AlanDrone.animated-wallpaper.desktop
+	rm -f $(APPS_DIR)/io.github.animated_wallpaper.desktop
 	rm -f $(AUTOSTART_DIR)/cosmic-wallpaper.desktop
 	rm -f $(SYSTEMD_USER_DIR)/cosmic-wallpaper.service
 	@echo "✓ Successfully uninstalled cosmic-wallpaper"

@@ -36,7 +36,7 @@ echo ""
 echo "[2/3] Connecting to remote repository..."
 echo "If you haven't created the repository yet, visit: https://github.com/new"
 echo ""
-read -p "Paste the repository URL here (e.g. https://github.com/AlanDrone/Animated-Wallpaper-for-Linux-wayland.git): " REPO_URL
+read -p "Paste the repository URL here (e.g. https://github.com/username/repository.git): " REPO_URL
 
 # Basic validation: must start with http or git@
 if [ -z "$REPO_URL" ]; then

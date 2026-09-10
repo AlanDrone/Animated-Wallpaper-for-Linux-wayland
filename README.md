@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-PolyForm%20Noncommercial%201.0.0-blue.svg" alt="License: PolyForm Noncommercial 1.0.0"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Free%20for%20Use%20%7C%20Attribution%20Required-blue.svg" alt="License: Free & Open Use with Attribution"></a>
   <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20Wayland-orange.svg" alt="Platform: Linux Wayland">
   <img src="https://img.shields.io/badge/Desktop-COSMIC%20Desktop-blueviolet.svg" alt="COSMIC Desktop">
   <img src="https://img.shields.io/badge/GPU-NVIDIA%20%7C%20AMD%20%7C%20Intel-green.svg" alt="GPU Support">
@@ -262,7 +262,7 @@ Animated-Wallpaper-for-Linux-wayland/
 │   └── cosmic-wallpaper.desktop    # XDG session autostart entry
 │
 ├── desktop/
-│   └── io.github.AlanDrone.animated-wallpaper.desktop    # Application menu launcher
+│   └── io.github.animated_wallpaper.desktop    # Application menu launcher
 │
 ├── systemd/
 │   └── cosmic-wallpaper.service    # Optional systemd user service unit
@@ -365,5 +365,9 @@ This removes:
 
 ## License
 
-This project is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE).  
-It is free to use, run, modify, and share for personal and noncommercial purposes. Commercial sale, monetization, or distribution for commercial advantage is strictly prohibited.
+This project is licensed under the [Animated Wallpaper License](LICENSE) (Free & Open Use with Attribution):
+
+- **Free & Open**: Free to download, run, inspect, and modify for personal and community use.
+- **Content Creation & Streaming**: You are expressly permitted to use this wallpaper in live streams (Twitch, YouTube, Kick, etc.), broadcasts, podcasts, and recorded videos — including monetized content.
+- **Attribution Required (No Plagiarism)**: You may not claim you created this software, rebrand it, or remove the original copyright and author attribution notices.
+- **No Resale**: Selling, charging fees for, or sublicensing this software (or modified versions) is strictly prohibited.
