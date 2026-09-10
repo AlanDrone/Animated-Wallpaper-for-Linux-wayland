@@ -44,7 +44,7 @@ def detect_drm_outputs():
     outputs = []
     drm_path = Path("/sys/class/drm")
     if not drm_path.exists():
-        return [{"name": "DVI-D-1", "status": "connected", "modes": ["1920x1080"]}]
+        return [{"name": "*", "status": "connected", "modes": ["auto"]}]
 
     for p in sorted(drm_path.glob("card*-*")):
         status_file = p / "status"
@@ -56,7 +56,7 @@ def detect_drm_outputs():
             continue
 
         raw_name = p.name
-        # format: card0-DVI-D-1 -> DVI-D-1
+        # format: card0-HDMI-A-1 -> HDMI-A-1
         parts = raw_name.split("-", 1)
         name = parts[1] if len(parts) > 1 else raw_name
 
@@ -81,7 +81,7 @@ def get_primary_connected_output():
     for o in outputs:
         if o["connected"]:
             return o["name"]
-    return "DVI-D-1"
+    return "*"
 
 def probe_video(video_path: str):
     res = {"width": 0, "height": 0, "is_4k": False}
@@ -326,7 +326,7 @@ class WallpaperDaemon:
             log(f"Restoring wallpaper on startup: {last_video}")
             self.start_engine(
                 last_video,
-                self.config.get("output", "DVI-D-1"),
+                self.config.get("output", get_primary_connected_output()),
                 self.config.get("scaling", "fit"),
                 self.config.get("paused", False)
             )

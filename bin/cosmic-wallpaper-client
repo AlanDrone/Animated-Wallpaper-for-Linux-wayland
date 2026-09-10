@@ -52,7 +52,7 @@ Usage:
   cosmic-wallpaper-client help
 
 Options for 'set':
-  --output <name>        Specify output monitor (e.g. DVI-D-1, DP-1, or '*'). Default: primary
+  --output <name>        Specify output monitor (e.g. HDMI-A-1, DP-1, or '*'). Default: primary
   --scaling <mode>       Scaling mode: fit (default), fill, stretch
 """)
 

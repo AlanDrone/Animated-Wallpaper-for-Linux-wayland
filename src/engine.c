@@ -261,7 +261,7 @@ static void print_usage(const char *prog) {
     fprintf(stderr,
             "Usage: %s [options] <video-path>\n\n"
             "Options:\n"
-            "  --output <name>        Target output port (e.g. DVI-D-1, DP-1, or '*'). Default: auto\n"
+            "  --output <name>        Target output port (e.g. HDMI-A-1, DP-1, or '*'). Default: auto\n"
             "  --scaling <mode>       Scaling mode: fit (default), fill, stretch\n"
             "  --pause                Start playback paused\n"
             "  --help                 Show this help message\n\n",

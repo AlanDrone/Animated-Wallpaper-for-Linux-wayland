@@ -86,6 +86,37 @@ APP_CSS = """
 }
 """
 
+def detect_system_outputs():
+    outputs = []
+    drm_path = Path("/sys/class/drm")
+    if drm_path.exists():
+        for p in sorted(drm_path.glob("card*-*")):
+            status_file = p / "status"
+            if not status_file.exists():
+                continue
+            try:
+                status = status_file.read_text().strip()
+            except Exception:
+                continue
+            if status != "connected":
+                continue
+
+            raw_name = p.name
+            parts = raw_name.split("-", 1)
+            name = parts[1] if len(parts) > 1 else raw_name
+
+            res_str = ""
+            modes_file = p / "modes"
+            if modes_file.exists():
+                try:
+                    modes = [m.strip() for m in modes_file.read_text().splitlines() if m.strip()]
+                    if modes:
+                        res_str = f" ({modes[0]})"
+                except Exception:
+                    pass
+            outputs.append((name, f"{name}{res_str}"))
+    return outputs
+
 def get_socket_path() -> Path:
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
     if runtime_dir and Path(runtime_dir).exists():
@@ -312,7 +343,9 @@ class CosmicWallpaperWindow(Adw.ApplicationWindow):
         self.cards = {}
         self.current_wallpaper = None
         self.is_paused = False
-        self.selected_output = "DVI-D-1"
+        self.detected_outputs = detect_system_outputs()
+        self.output_values = [name for name, _ in self.detected_outputs] + ["*"]
+        self.selected_output = self.output_values[0] if self.output_values else "*"
         self.selected_scaling = "fit"
 
         self.load_library()
@@ -363,7 +396,8 @@ class CosmicWallpaperWindow(Adw.ApplicationWindow):
         mon_label.add_css_class("heading")
         toolbar.append(mon_label)
 
-        self.monitor_dropdown = Gtk.DropDown.new_from_strings(["DVI-D-1 (1920x1080)", "All Monitors (*)"])
+        dropdown_labels = [label for _, label in self.detected_outputs] + ["All Monitors (*)"]
+        self.monitor_dropdown = Gtk.DropDown.new_from_strings(dropdown_labels)
         self.monitor_dropdown.connect("notify::selected", self.on_monitor_changed)
         toolbar.append(self.monitor_dropdown)
 
@@ -611,7 +645,10 @@ class CosmicWallpaperWindow(Adw.ApplicationWindow):
 
     def on_monitor_changed(self, dropdown, _param):
         idx = dropdown.get_selected()
-        self.selected_output = "DVI-D-1" if idx == 0 else "*"
+        if idx < len(self.output_values):
+            self.selected_output = self.output_values[idx]
+        else:
+            self.selected_output = "*"
         if self.current_wallpaper:
             self.apply_wallpaper(self.current_wallpaper)
 
