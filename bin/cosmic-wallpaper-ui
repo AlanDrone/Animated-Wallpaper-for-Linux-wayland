@@ -15,6 +15,7 @@ import hashlib
 import shutil
 import threading
 import subprocess
+import webbrowser
 from pathlib import Path
 from PIL import Image
 
@@ -381,6 +382,13 @@ class CosmicWallpaperWindow(Adw.ApplicationWindow):
         stop_btn.add_css_class("destructive-action")
         stop_btn.connect("clicked", self.on_stop_wallpaper)
         header.pack_end(stop_btn)
+
+        # Buy Me a Coffee Button
+        coffee_btn = Gtk.Button(label="☕ Support")
+        coffee_btn.add_css_class("flat")
+        coffee_btn.set_tooltip_text("Buy Me a Coffee (Support development)")
+        coffee_btn.connect("clicked", lambda _: webbrowser.open("https://buymeacoffee.com/alandrone"))
+        header.pack_end(coffee_btn)
 
         main_box.append(header)
 

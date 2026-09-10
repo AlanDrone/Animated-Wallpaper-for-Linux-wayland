@@ -4,6 +4,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Free%20for%20Use%20%7C%20Attribution%20Required-blue.svg" alt="License: Free & Open Use with Attribution"></a>
+  <a href="https://buymeacoffee.com/alandrone" target="_blank"><img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-yellow.svg?logo=buy-me-a-coffee" alt="Buy Me A Coffee"></a>
   <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20Wayland-orange.svg" alt="Platform: Linux Wayland">
   <img src="https://img.shields.io/badge/Desktop-COSMIC%20Desktop-blueviolet.svg" alt="COSMIC Desktop">
   <img src="https://img.shields.io/badge/GPU-NVIDIA%20%7C%20AMD%20%7C%20Intel-green.svg" alt="GPU Support">
@@ -30,6 +31,7 @@
 - [Project Structure](#project-structure)
 - [Technical Details](#technical-details)
 - [FAQ](#faq)
+- [Support](#support)
 - [Uninstall](#uninstall)
 - [License](#license)
 
@@ -341,6 +343,18 @@ This is the <code>GL_INVALID_OPERATION</code> bug caused by the NVIDIA driver re
 <br>
 Yes. Select a specific output name (e.g. <code>HDMI-A-1</code>, <code>DP-1</code>, <code>eDP-1</code>) from the Monitor dropdown, or choose <code>All Monitors (*)</code>. The daemon detects connected outputs via <code>/sys/class/drm</code> without relying on any compositor-specific extension.
 </details>
+
+---
+
+## Support
+
+If you enjoy this project and it solved your animated wallpaper issues on COSMIC Desktop, consider buying me a coffee to support continued development and maintenance!
+
+<p align="center">
+  <a href="https://buymeacoffee.com/alandrone" target="_blank">
+    <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" width="210">
+  </a>
+</p>
 
 ---
 
